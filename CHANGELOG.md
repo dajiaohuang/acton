@@ -1,5 +1,219 @@
 # Changelog
 
+## Unreleased
+
+### Language
+- Give parameters explicit defaults, for example
+  `def collect(items: list[int]=[])`; a nullable type alone no longer makes an
+  argument optional. At a call such as `collect()`, the compiler supplies the
+  declared expression as the missing argument. Defaults may be literals,
+  constructor calls, or module-level values resolved in the function's own
+  module; explicitly passing `None` keeps it as `None`. Because defaults become
+  ordinary call arguments, `int` and `bool` values can stay unboxed, reducing
+  allocation and conversion overhead. [#3211]
+
+### Compiler & Build
+- Speed up compilation of large generated modules through compact name
+  storage, cheaper name comparisons, and concurrent content hashing. On an
+  M4 Pro, compact name storage reduced Acton compilation of half the generated
+  `juniper_crpd` module from 54.3 to 18.0 seconds, about three times faster,
+  excluding the native build. Content hashing in that workload fell from 25.8
+  to 4.6 seconds, and cached-interface writing from 11.3 to 2.0 seconds.
+  Further hashing improvements cut full-module hashing from 9.8 to 6.1 seconds.
+  Content hashes and generated C are unchanged. Existing cached module
+  interfaces (`.tydb`) are rebuilt for the new name encoding. [#3282] [#3284]
+  [#3286]
+- Inspect parameter lifetimes with `--escape-analysis`. The compiler now
+  checks `Hashable.hash` lifetimes across modules, and incremental builds
+  recheck dependent code when a helper's lifetime behavior changes. Existing
+  cached module interfaces are rebuilt for the new analysis data. [#3290]
+- Correct calls of actor methods passed as `proc` parameters so assignments
+  and returns wait for the action's reply. Calls used as statements send
+  without waiting, including calls through forced unwrapping (`!`), optional
+  chaining (`?.`), and conditional expressions, preventing actor deadlocks.
+  [#3300]
+- Keep symbols needed by dynamic module libraries in optimized macOS
+  executables, fixing release builds that fail to load a library with a
+  `symbol not found in flat namespace` error. [#3298]
+- Keep cached output for modules with dots in their filenames, including
+  names such as `y.root`, and binaries for nested modules such as `sub.x`,
+  avoiding needless recompilation or reinstallation on every full build.
+  Watch mode and the language server remove cached interfaces, generated C,
+  and generated startup code for deleted modules from the correct project
+  directory. Full builds also remove generated startup code and binaries when
+  a module loses its root actor. [#3285] [#3289] [#3292]
+- Report duplicate actor and function names in top-level declaration groups
+  at the second definition, instead of crashing the type checker, reporting
+  unrelated type errors, or generating invalid C. Duplicate-name checks also
+  scale better for large groups of declarations. Also reject duplicate methods
+  in classes, protocols, and extensions at the second definition, and report
+  a signature placed after its method as an illegal override. [#3274] [#3277]
+- Upgrade the bundled Zig toolchain to 0.17.0 and update the bundled garbage
+  collector for Zig 0.17 compatibility. Add native optimization-mode flags:
+  `--debug`, `--safe`, `--fast`, and `--small`. The existing `--release`,
+  `--release=fast`, `--release=safe`, and `--release=small` forms remain as
+  compatibility aliases. [#3249] [#3254]
+- Key Zig's configuration cache by the absolute project root, preventing
+  concurrent single-file and scratch builds from sharing incompatible cached
+  configurations and failing with missing configuration files. [#3258]
+- Correct cleanup for `return`, `break`, and `continue` that leave a plain
+  nested `try` inside a continuation-converted `try`, preventing crashes when
+  an enclosing `finally` clause runs. [#3241]
+
+### CLI & Project Workflow
+- Set the runtime worker limit with
+  `build_options = {"max_wthreads": "1023"}` in `Build.act`, allowing
+  applications on large machines to use more than 255 workers. Values from
+  4 to 65535 apply consistently to the application, its dependencies, and the
+  standard library; the default remains 255. Runtime tables reserve about
+  1 KiB per allowed worker even when fewer workers run. [#3297]
+- Fail with a clear error and nonzero exit status when a single-file or
+  watch-mode build names a source file that does not exist, instead of silently
+  compiling nothing or other project modules. This also applies when multiple
+  input files are named. [#3260]
+
+### Runtime & Standard Library
+- Improve concurrent actor scheduling with per-worker ready queues, reducing
+  contention on the shared queue. On an M4 Pro with eight workers, paired-actor
+  and token-ring benchmarks ran about 20 to 25 times faster than with the
+  shared-queue scheduler. Pipeline, fleet-load, and hot-server benchmarks took
+  43% to 65% less time with eight workers. Idle workers steal queued actors,
+  while busy workers rebalance queues using actor wait times. Actors pinned
+  to a worker keep their affinity. RTS monitor output includes local queue
+  lengths and work-stealing and balancing counters. [#3291]
+- Reduce message-scheduling overhead by accessing the worker context and
+  current actor directly instead of through pthread keys. With eight workers,
+  five scheduling benchmarks took 7% to 18% less time on an M4 Pro and 2% to
+  11% less time on a Ryzen 9 5950X than with the previous runtime. [#3294]
+- Start reliably on machines with many CPUs by capping automatic worker
+  selection at the configured limit (255 by default), preventing out-of-bounds
+  access on machines with more logical CPUs. Also remove unused CPU-mask setup
+  that could fail at startup on Macs with 32 or more CPUs. [#3295] [#3297]
+- Improve `bytes` slicing and `bytes`/`bytearray` case conversion by exposing
+  runtime allocator guarantees to the C compiler, allowing it to keep buffer
+  pointers in registers and vectorize loops. [#3293]
+- Inspect how long ready actors wait to run through RTS monitor logs,
+  sockets, or `--rts-mon-on-exit`. Workers report counts, total and maximum
+  wait times, and a histogram, with microsecond resolution. Wait statistics
+  are collected only when monitor output is enabled and are not included in
+  `acton.rts.rts_stats()`. [#3287]
+- Compile regular expressions once with `re.compile(pattern)` and reuse the
+  resulting `Pattern` across calls and actors. Its `match`, `matches`, and
+  `split` methods take the module functions' arguments without the pattern.
+  `re.matches` and `re.split` also compile once per call instead of once per
+  match. Temporary matching data uses C allocation to reduce GC work and is
+  freed even when matching or result construction raises. [#3271] [#3278]
+- Reduce garbage-collection work for numeric-heavy programs by allocating
+  boxed scalars, ranges, and `bigint` digits as pointer-free objects and by
+  prefetching only objects that the collector will scan. [#3248] [#3250]
+  [#3251]
+- Update the bundled garbage collector to newer upstream code with fixes that
+  avoid treating stale thread-context data as live pointers, prevent
+  cancellation from leaving exiting threads registered, recover from stale
+  stack faults on Windows when external threads are registered, and reduce
+  allocation, marking, heap-walk, and sweeping overhead. [#3253] [#3259]
+- Keep objects reachable from an actor's `__cleanup__` alive when marking
+  overflows the GC mark stack, preventing incorrect results or crashes during
+  cleanup. Grow the mark stack without dropping work when the collecting
+  thread marks alone, and reuse claimed stack slots during parallel marking
+  to avoid unnecessary overflows and heap rescans. GC mark-stack event logging
+  also avoids C-library lock deadlocks while other threads are stopped.
+  [#3272]
+- Reduce collection and allocator overhead for growing or multithreaded heaps.
+  Acton now expands the GC heap by up to a quarter at a time, uses 16 KiB heap
+  blocks, serves objects up to 2 KiB from thread-local free lists, and sets the
+  allocation budget to 100% of live data. Thread-local free lists now refill
+  with up to 16 heap blocks per allocator-lock acquisition, reducing lock
+  contention. These defaults trade higher memory use for throughput. The
+  `Build.act` settings can restore fixed 16 MiB growth, 4 KiB blocks, the
+  384-byte thread-local limit, the 67% allocation budget, and single-block
+  refills. [#3243] [#3265] [#3267] [#3270]
+- Reduce GC coordination overhead for small mark phases by choosing the number
+  of participating markers from estimated scan work, using one marker per
+  4 MiB by default. Configure `gc_bytes_per_marker` in `Build.act` or
+  `GC_BYTES_PER_MARKER` at startup; `0` restores full marker participation.
+  The initial mark stack also grows to 4,194,304 entries, while Windows keeps
+  1,048,576, reducing slow overflow recovery on large heaps. Both settings
+  are reported by `acton.rts.get_gc_info()`. [#3268] [#3269]
+- Prefer performance cores when sizing the default GC marker pool on macOS
+  and Linux. Include efficiency cores as needed to count at least 40% of
+  logical CPUs before applying the 16-marker cap; `GC_MARKERS` and
+  `GC_NPROCS` retain explicit control. Linux processor discovery also reads
+  all CPU entries in `/proc/stat`, avoiding undercounts on machines with many
+  CPUs or large uptime counters. [#3296]
+- Speed up JSON encoding and decoding and avoid retaining temporary documents
+  by using ordinary C allocation for yyjson work data and freeing each document
+  before returning. Encoding NaN or infinite floats now raises `ValueError`
+  instead of crashing, allocation failures raise `MemoryError`, and extremely
+  large numbers are no longer truncated during parsing. [#3255] [#3264]
+- Free temporary JSON encoding and decoding data and XML decoding data even
+  when building the result raises, preventing memory leaks on allocation
+  failure. XML text and attribute allocation failures now raise `MemoryError`
+  instead of crashing. [#3276]
+- Upgrade the bundled Mbed TLS library to the 3.6.7 LTS release while retaining
+  Acton's allocator hooks and non-Windows thread locking. [#3263]
+- Upgrade the bundled libuv library to 1.53.0 with fixes for DNS hostnames,
+  child descriptor remapping, and inherited nonblocking descriptors. Child
+  processes also remain reliable when spawned during concurrent garbage
+  collection. [#3266]
+- Fix parsing negative integer strings whose digit count exactly matches the
+  parser's chunk size, including fixed-width integer constructors, and fix
+  `bigint` `&`, `|`, and `^` results for negative operands. [#3246] [#3247]
+- Hash bounded numeric types, complex values, and immutable sets directly,
+  avoiding most of the allocation and runtime overhead of stateful hashing.
+  Hashing user-defined values, including dictionary and set operations, now
+  keeps the temporary hasher on the stack instead of allocating it on the GC
+  heap. [#3244] [#3290]
+- Reduce exception-handling overhead by keeping ordinary `try` frames on the
+  C stack instead of allocating them on the GC heap. On macOS, also avoid
+  unnecessary signal-mask saves and restores around `try` blocks and raised
+  exceptions. [#3240] [#3275]
+- Access runtime worker statistics atomically, removing data races between
+  worker updates and monitoring through `acton.rts.rts_stats()`. [#3234]
+- Reduce per-message statistics bookkeeping by reusing each worker's
+  statistics entry, and use consistent 64-bit counters, worker indices, and
+  timing values across platforms, including Windows. [#3279] [#3281]
+
+### Documentation
+- Document generator expressions and `flatmap()`, including lazy evaluation,
+  capture timing, purity requirements, and callback behavior. [#3242]
+
+### Testing & CI
+- Select the Command Line Tools linker in macOS CI so it matches GHC's SDK,
+  avoiding build failures when runners ship newer Command Line Tools than the
+  default Xcode. [#3283]
+- Mirror the maintained Acton programs from the Programming Language
+  Benchmarks suite and test their expected output in CI, keeping the published
+  benchmark programs working as the compiler evolves. Add faster alternative
+  implementations for five programs using reusable buffers, arrays, bitsets,
+  and periodic state rescaling, plus array-based and parallel versions of
+  fannkuch-redux. [#3257] [#3261] [#3273]
+- Allow slow unit, asynchronous, and environment tests to extend their
+  watchdog deadline with `t.timeout(seconds)` while keeping the deadline
+  anchored to the original test start. [#3245]
+
+### Compatibility Notes
+- `Hashable.hash` implementations must use the supplied hasher only during
+  the call. Storing it, capturing it in a closure, or passing it to code whose
+  lifetime behavior the compiler cannot verify is now rejected. Forward it
+  to field hash methods or checked top-level helpers instead. [#3290]
+- Custom allocators installed with `acton_replace_allocator()` must return
+  fresh storage from allocation and string-copy callbacks. Reallocation
+  callbacks may still return the original block. [#3293]
+- Compiled regular-expression `Pattern` objects do not yet support restoration
+  from the actor database; recreate them from their pattern strings. [#3278]
+- C extensions using `$PUSH()` or `$PUSH_BUF()` must now declare a local
+  `struct JumpBuf frame` and pass `&frame`. Ordinary `try` blocks now use C
+  stack space, so deep recursion through them can exhaust the worker stack
+  sooner. [#3275]
+- Nullable parameter types no longer make arguments optional. Add an explicit
+  `=None` where omission is intended. Default expressions also cannot depend on
+  another parameter or capture an enclosing local name. [#3211]
+- Boxed scalars are now allocated in pointer-free memory, so a pointer cast to
+  an integer and stored in a boxed `int` no longer keeps its target alive. C
+  extensions must retain such references in collector-scanned storage.
+  [#3250]
+
 ## [0.31.0] - 2026-10-08
 
 This release brings major performance improvements across the compiler,
@@ -5335,6 +5549,7 @@ then, this second incarnation has been in focus and 0.2.0 was its first version.
 [#3208]: https://github.com/actonlang/acton/pull/3208
 [#3209]: https://github.com/actonlang/acton/pull/3209
 [#3210]: https://github.com/actonlang/acton/pull/3210
+[#3211]: https://github.com/actonlang/acton/pull/3211
 [#3212]: https://github.com/actonlang/acton/pull/3212
 [#3214]: https://github.com/actonlang/acton/pull/3214
 [#3215]: https://github.com/actonlang/acton/pull/3215
@@ -5353,7 +5568,63 @@ then, this second incarnation has been in focus and 0.2.0 was its first version.
 [#3231]: https://github.com/actonlang/acton/pull/3231
 [#3232]: https://github.com/actonlang/acton/pull/3232
 [#3233]: https://github.com/actonlang/acton/pull/3233
+[#3234]: https://github.com/actonlang/acton/pull/3234
 [#3236]: https://github.com/actonlang/acton/pull/3236
+[#3240]: https://github.com/actonlang/acton/pull/3240
+[#3241]: https://github.com/actonlang/acton/pull/3241
+[#3242]: https://github.com/actonlang/acton/pull/3242
+[#3243]: https://github.com/actonlang/acton/pull/3243
+[#3244]: https://github.com/actonlang/acton/pull/3244
+[#3245]: https://github.com/actonlang/acton/pull/3245
+[#3246]: https://github.com/actonlang/acton/pull/3246
+[#3247]: https://github.com/actonlang/acton/pull/3247
+[#3248]: https://github.com/actonlang/acton/pull/3248
+[#3249]: https://github.com/actonlang/acton/pull/3249
+[#3250]: https://github.com/actonlang/acton/pull/3250
+[#3251]: https://github.com/actonlang/acton/pull/3251
+[#3253]: https://github.com/actonlang/acton/pull/3253
+[#3254]: https://github.com/actonlang/acton/pull/3254
+[#3255]: https://github.com/actonlang/acton/pull/3255
+[#3257]: https://github.com/actonlang/acton/pull/3257
+[#3258]: https://github.com/actonlang/acton/pull/3258
+[#3259]: https://github.com/actonlang/acton/pull/3259
+[#3260]: https://github.com/actonlang/acton/pull/3260
+[#3261]: https://github.com/actonlang/acton/pull/3261
+[#3263]: https://github.com/actonlang/acton/pull/3263
+[#3264]: https://github.com/actonlang/acton/pull/3264
+[#3265]: https://github.com/actonlang/acton/pull/3265
+[#3266]: https://github.com/actonlang/acton/pull/3266
+[#3267]: https://github.com/actonlang/acton/pull/3267
+[#3268]: https://github.com/actonlang/acton/pull/3268
+[#3269]: https://github.com/actonlang/acton/pull/3269
+[#3270]: https://github.com/actonlang/acton/pull/3270
+[#3271]: https://github.com/actonlang/acton/pull/3271
+[#3272]: https://github.com/actonlang/acton/pull/3272
+[#3273]: https://github.com/actonlang/acton/pull/3273
+[#3274]: https://github.com/actonlang/acton/pull/3274
+[#3275]: https://github.com/actonlang/acton/pull/3275
+[#3276]: https://github.com/actonlang/acton/pull/3276
+[#3277]: https://github.com/actonlang/acton/pull/3277
+[#3278]: https://github.com/actonlang/acton/pull/3278
+[#3279]: https://github.com/actonlang/acton/pull/3279
+[#3281]: https://github.com/actonlang/acton/pull/3281
+[#3282]: https://github.com/actonlang/acton/pull/3282
+[#3283]: https://github.com/actonlang/acton/pull/3283
+[#3284]: https://github.com/actonlang/acton/pull/3284
+[#3285]: https://github.com/actonlang/acton/pull/3285
+[#3286]: https://github.com/actonlang/acton/pull/3286
+[#3287]: https://github.com/actonlang/acton/pull/3287
+[#3289]: https://github.com/actonlang/acton/pull/3289
+[#3290]: https://github.com/actonlang/acton/pull/3290
+[#3291]: https://github.com/actonlang/acton/pull/3291
+[#3292]: https://github.com/actonlang/acton/pull/3292
+[#3293]: https://github.com/actonlang/acton/pull/3293
+[#3294]: https://github.com/actonlang/acton/pull/3294
+[#3295]: https://github.com/actonlang/acton/pull/3295
+[#3296]: https://github.com/actonlang/acton/pull/3296
+[#3297]: https://github.com/actonlang/acton/pull/3297
+[#3298]: https://github.com/actonlang/acton/pull/3298
+[#3300]: https://github.com/actonlang/acton/pull/3300
 
 
 [0.3.0]: https://github.com/actonlang/acton/releases/tag/v0.3.0
